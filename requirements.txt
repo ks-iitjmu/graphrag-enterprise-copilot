@@ -7,3 +7,5 @@ beautifulsoup4>=4.12
 lxml>=5.0
 faiss-cpu>=1.8
 numpy>=1.26
+# Step 3: knowledge graph
+neo4j>=5.20

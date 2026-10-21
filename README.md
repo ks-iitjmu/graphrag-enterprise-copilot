@@ -16,7 +16,7 @@ financial facts, all downloaded from SEC EDGAR. All data is public; none is simu
 
 - [x] Step 1: download filings and build the financial SQL database
 - [x] Step 2: chunk and embed report text into FAISS
-- [ ] Step 3: build the knowledge graph in Neo4j
+- [ ] Step 3: build the knowledge graph in Neo4j (3a structured facts done; 3b LLM extraction next)
 - [ ] Step 4: vector, Cypher and SQL tools
 - [ ] Step 5: LangGraph agent with routing and retries
 - [ ] Step 6: evaluation with RAGAS against a vector-only baseline
@@ -66,7 +66,9 @@ removes hidden elements, rebuilds paragraphs and table rows as lines, finds ever
 skips the table of contents. Items 6, 15 and 16 (reserved, exhibit list, summary) are
 dropped. Intel does not organise its 10-K by Item at all; it uses its own chapters and a
 cross-reference table, so when Item sections cover less than 30% of a report, the whole
-report is kept as one section (item "ALL") instead of being split wrongly.
+report is kept as one section (item "ALL") instead of being split wrongly. Item 15 is
+kept when it is large, because NVIDIA places its financial statements and notes there
+rather than in Item 8.
 
 **Chunking.** About 1,500 characters per chunk, cut at line boundaries with a
 200-character overlap. Each chunk is embedded together with a header such as
@@ -75,4 +77,25 @@ which company and year a passage belongs to.
 
 **Index.** `nomic-embed-text` through Ollama, with its separate document and query
 prefixes; vectors are normalised and stored in a FAISS inner-product index (cosine
-similarity). Search supports filters by company, fiscal year and section.
+similarity). Search supports filters by company, fiscal year and section, and skips
+passages that are near-copies of one already returned (10-Ks repeat paragraphs across
+sections and years).
+
+## Step 3a: knowledge graph (structured facts)
+
+```bash
+python ingest/parse_subsidiaries.py   # Exhibit 21 lists -> data/graph/subsidiaries.csv
+python ingest/classify_risks.py       # risk passages -> topics, data/graph/risk_topics.csv
+python graph/load_graph.py --reset    # load into Neo4j
+```
+
+| Node | From |
+|---|---|
+| `Company`, `Report` | SEC company data and the filing manifest (with source URLs for citations) |
+| `Subsidiary`, `Jurisdiction` | Exhibit 21 of each 10-K: tables, ownership-percentage tables and plain lists are all parsed; US states map to country "United States" |
+| `RiskTopic` | 15 fixed topics; each risk-factor passage is assigned to its most similar topic description using the stored embeddings (no LLM calls), and a company cites a topic in a year when at least two passages are assigned to it |
+
+Relationships: `(Company)-[:FILED]->(Report)`,
+`(Company)-[:HAS_SUBSIDIARY {fiscal_years}]->(Subsidiary)-[:INCORPORATED_IN]->(Jurisdiction)`,
+`(Company)-[:CITES_RISK {fiscal_year, passages, evidence}]->(RiskTopic)`, where `evidence`
+holds the chunk ids of the strongest passages so answers can cite them.

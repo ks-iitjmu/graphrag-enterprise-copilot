@@ -61,6 +61,7 @@ def html_to_lines(html: bytes) -> list[str]:
     for tag in soup.find_all(BLOCKS):
         tag.append("\n")
     text = soup.get_text("").replace("\xa0", " ").replace("\u200b", "")
+    text = re.sub(r"\bTable of Contents\b", "", text)          # page-navigation link text
     lines = []
     for raw in text.split("\n"):
         line = re.sub(r"\s+", " ", raw)
