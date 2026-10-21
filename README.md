@@ -15,7 +15,7 @@ financial facts, all downloaded from SEC EDGAR. All data is public; none is simu
 ## Status
 
 - [x] Step 1: download filings and build the financial SQL database
-- [ ] Step 2: chunk and embed report text into FAISS
+- [x] Step 2: chunk and embed report text into FAISS
 - [ ] Step 3: build the knowledge graph in Neo4j
 - [ ] Step 4: vector, Cypher and SQL tools
 - [ ] Step 5: LangGraph agent with routing and retries
@@ -49,3 +49,30 @@ total liabilities, cash and stockholders' equity.
 Companies tag the same item with different XBRL concepts, so each metric lists candidate
 concepts in priority order. Values restated in later filings keep the latest figure, and
 only full-year values are kept.
+
+## Step 2: vector index
+
+```bash
+python ingest/parse_10k.py            # 10-K HTML -> clean text split by Item
+python ingest/build_vector_index.py   # chunks -> embeddings (nomic-embed-text) -> FAISS
+python retrieval/vector_search.py "export controls on AI chips" --ticker NVDA
+```
+
+**Parsing.** 10-Ks are inline-XBRL HTML: hidden XBRL blocks, sentences split across many
+`<span>` tags, and a table of contents that repeats every Item heading. The parser
+removes hidden elements, rebuilds paragraphs and table rows as lines, finds every
+"Item N" heading, merges repeated headings of the same item (Microsoft prints a running
+"PART II Item 7" header on every page) and keeps the longest section per item, which
+skips the table of contents. Items 6, 15 and 16 (reserved, exhibit list, summary) are
+dropped. Intel does not organise its 10-K by Item at all; it uses its own chapters and a
+cross-reference table, so when Item sections cover less than 30% of a report, the whole
+report is kept as one section (item "ALL") instead of being split wrongly.
+
+**Chunking.** About 1,500 characters per chunk, cut at line boundaries with a
+200-character overlap. Each chunk is embedded together with a header such as
+"NVIDIA (NVDA) 10-K, fiscal year 2025, Item 1A: Risk Factors", so retrieval respects
+which company and year a passage belongs to.
+
+**Index.** `nomic-embed-text` through Ollama, with its separate document and query
+prefixes; vectors are normalised and stored in a FAISS inner-product index (cosine
+similarity). Search supports filters by company, fiscal year and section.
