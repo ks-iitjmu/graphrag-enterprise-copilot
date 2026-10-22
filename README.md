@@ -19,7 +19,7 @@ financial facts, all downloaded from SEC EDGAR. All data is public; none is simu
 - [x] Step 3: build the knowledge graph in Neo4j
 - [x] Step 4: vector, Cypher and SQL tools
 - [x] Step 5: LangGraph agent with routing and retries
-- [ ] Step 6: evaluation with RAGAS against a vector-only baseline
+- [x] Step 6: evaluation with RAGAS against a vector-only baseline
 - [ ] Step 7: FastAPI service
 - [ ] Step 8: deployment on Azure
 
@@ -177,3 +177,41 @@ question -> route -> run_tools --(something found)--> answer -> check_citations 
   such as [A, B]; ids that were never retrieved and pseudo-sources such as
   [cypher query] become "(unverified)", so an answer cannot point to a source that does
   not exist. Answers that say the context lacks the information are not forced to cite.
+
+## Step 6: evaluation
+
+```bash
+python eval/build_testset.py                 # 1. text questions from passages -> eval/vector_review.csv
+#   review eval/vector_review.csv by hand: set keep=no for bad questions, fix references
+python eval/build_testset.py --apply-review  # 2. full test set -> eval/testset.jsonl
+python eval/run_eval.py                      # 3. agent and baseline answer every question
+python eval/score.py --ragas --smoke         # 4. check the RAGAS judge works (2 answers)
+python eval/score.py --ragas                 # 5. all scores -> eval/results/summary.md
+```
+
+**Test set** (`eval/testset.jsonl`), each question with a reference answer and the tools it needs:
+
+| Category | Questions | Reference |
+|---|---|---|
+| sql | 15 | computed exactly from `finance.db` |
+| cypher | ~12 | computed from the knowledge graph |
+| vector | ~16 | written by the LLM from one passage each, then reviewed by hand |
+| combined | 4 | graph + financial data, or financial data + text |
+| unanswerable | 4 | a correct answer says the data does not contain it |
+
+**Systems compared**: the agent, and a vector-only RAG baseline that uses the same LLM,
+answer prompt, passages and citation check, but no routing, graph or SQL.
+
+**Metrics**: routing accuracy; exact checks that the expected numbers (with rounding
+tolerance) and entities appear in the answer; correct and wrong refusals; citation rate
+and invalid citations; whether the source passage of a text question was retrieved;
+latency; and RAGAS 0.4 faithfulness, answer relevancy, context precision and context
+recall, judged by the local Qwen model through Ollama's OpenAI-compatible API.
+
+**Caveats**: graph references test whether the agent retrieves what the graph holds, not
+whether the LLM-built graph is complete; the RAGAS judge is the same local model that
+answers, which can favour its own style, so the exact checks are reported alongside it.
+
+### Results
+
+Paste `eval/results/summary.md` here after running.

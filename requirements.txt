@@ -11,3 +11,8 @@ numpy>=1.26
 neo4j>=5.20
 # Step 5: agent
 langgraph>=0.2
+# Step 6: evaluation
+ragas==0.4.3
+langchain-community<0.4   # ragas 0.4.3 imports a module removed in langchain-community 0.4
+openai>=1.40              # Ollama's OpenAI-compatible API, used by the RAGAS judge
+tabulate>=0.9
