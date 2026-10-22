@@ -17,7 +17,7 @@ financial facts, all downloaded from SEC EDGAR. All data is public; none is simu
 - [x] Step 1: download filings and build the financial SQL database
 - [x] Step 2: chunk and embed report text into FAISS
 - [x] Step 3: build the knowledge graph in Neo4j
-- [ ] Step 4: vector, Cypher and SQL tools
+- [x] Step 4: vector, Cypher and SQL tools
 - [ ] Step 5: LangGraph agent with routing and retries
 - [ ] Step 6: evaluation with RAGAS against a vector-only baseline
 - [ ] Step 7: FastAPI service
@@ -124,3 +124,24 @@ Why the LLM rather than embeddings for risk topics: tagging by embedding similar
 assigned every passage to some topic (3,133 of 3,133), inflated Intel (whose whole report,
 not just its risk chapter, was classified), and almost never found "intense competition",
 because the topic descriptions overlap. The LLM can return several topics or none.
+
+10-K risk sections mention nearly every topic, so each `CITES_RISK` link also stores
+`share` (the topic's fraction of the company's risk passages) and `rank` (its position in
+the company's risk profile). Queries can then ask what a company emphasises, not just what
+it mentions.
+
+## Step 4: retrieval tools
+
+```bash
+python tools/sql_tool.py "Which company had the highest net margin in its latest fiscal year?"
+python tools/cypher_tool.py "Which companies name AMD as a competitor?"
+python tools/vector_tool.py "What does NVIDIA say about export controls?"
+```
+
+Every tool returns a `ToolResult` with its results and the evidence to cite.
+
+| Tool | How it works | Safeguards |
+|---|---|---|
+| `sql_tool` | The LLM writes a SQLite query against `annual_financials` from the schema, fiscal-year conventions and worked examples | read-only connection; a single SELECT/WITH statement; automatic row limit; on an error the query is retried with the database message |
+| `cypher_tool` | The LLM writes a Cypher query from the graph schema, the exact organisation, risk-topic and segment names read from the graph, and worked examples | write clauses rejected; read-only transaction; row limit; retried on errors and on empty results; evidence passage ids collected from the rows |
+| `vector_tool` | Semantic search filtered by the companies and years named in the question, balanced across companies when several are named | near-duplicate passages removed; falls back without the year filter if nothing matches |

@@ -53,6 +53,7 @@ ALIASES = {"The Netherlands": "Netherlands", "Holland": "Netherlands", "UK": "Un
            "U.S.A.": "United States", "Republic of Korea": "South Korea", "Korea": "South Korea",
            "People's Republic of China": "China", "PRC": "China", "Hong Kong SAR": "Hong Kong",
            "Grand Cayman": "Cayman Islands", "British Virgin Islands": "British Virgin Islands"}
+STATUS_WORDS = re.compile(r"(dissolv|inactive|dormant|liquidat|in process|merged|struck off)", re.I)
 HEADER_WORDS = re.compile(r"\b(name|jurisdiction|incorporat|organiz|subsidiar|state or|"
                           r"country|domicile|percent|ownership|exhibit)\b", re.I)
 
@@ -82,7 +83,8 @@ def country_of(jurisdiction: str) -> str:
 
 def plausible(name: str, jurisdiction: str) -> bool:
     return (3 <= len(name) <= 150 and 2 <= len(jurisdiction) <= 40
-            and not re.search(r"\d", jurisdiction) and not HEADER_WORDS.search(jurisdiction))
+            and not re.search(r"\d", jurisdiction) and not HEADER_WORDS.search(jurisdiction)
+            and not STATUS_WORDS.search(jurisdiction))
 
 
 def parse_exhibit(html: bytes) -> list[tuple[str, str]]:
@@ -93,7 +95,10 @@ def parse_exhibit(html: bytes) -> list[tuple[str, str]]:
             cells = [c.strip() for c in line.split("|")]
             cells = [c for c in cells if c and not re.fullmatch(r"[\d.%\s]+", c)]  # drop % columns
             if len(cells) >= 2:
-                name, jurisdiction = cells[0], cells[-1]
+                # Tables may carry extra columns (status, notes): prefer a cell that is a
+                # known jurisdiction, otherwise the last cell
+                known = [c for c in cells[1:] if is_jurisdiction(c)]
+                name, jurisdiction = cells[0], (known[-1] if known else cells[-1])
         elif is_jurisdiction(line) and pending:                # alternating-line format
             name, jurisdiction = pending, line
         else:
