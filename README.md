@@ -18,7 +18,7 @@ financial facts, all downloaded from SEC EDGAR. All data is public; none is simu
 - [x] Step 2: chunk and embed report text into FAISS
 - [x] Step 3: build the knowledge graph in Neo4j
 - [x] Step 4: vector, Cypher and SQL tools
-- [ ] Step 5: LangGraph agent with routing and retries
+- [x] Step 5: LangGraph agent with routing and retries
 - [ ] Step 6: evaluation with RAGAS against a vector-only baseline
 - [ ] Step 7: FastAPI service
 - [ ] Step 8: deployment on Azure
@@ -145,3 +145,35 @@ Every tool returns a `ToolResult` with its results and the evidence to cite.
 | `sql_tool` | The LLM writes a SQLite query against `annual_financials` from the schema, fiscal-year conventions and worked examples | read-only connection; a single SELECT/WITH statement; automatic row limit; on an error the query is retried with the database message |
 | `cypher_tool` | The LLM writes a Cypher query from the graph schema, the exact organisation, risk-topic and segment names read from the graph, and worked examples | write clauses rejected; read-only transaction; row limit; retried on errors and on empty results; evidence passage ids collected from the rows |
 | `vector_tool` | Semantic search filtered by the companies and years named in the question, balanced across companies when several are named | near-duplicate passages removed; falls back without the year filter if nothing matches |
+
+## Step 5: the agent (LangGraph)
+
+```bash
+python agent/graph.py "Which companies emphasise export-control risk, and how did their revenue change from 2024 to 2025?"
+python agent/graph.py -v "Why did Intel's revenue decline?"      # -v shows queries and context
+```
+
+```
+question -> route -> run_tools --(something found)--> answer -> check_citations -> result
+                          \--(nothing found)--> vector fallback --/
+```
+
+- **route**: the LLM picks one or more sources (sql, cypher, vector) and writes a
+  self-contained sub-question for each, so a question such as "which companies
+  emphasise export controls, and how did their revenue change?" becomes a graph
+  question plus a financial-data question.
+- **run_tools**: the graph runs first; when a later sub-question names no company, the
+  companies the graph found are passed on to it (so "which companies emphasise export
+  controls, and how did their revenue change?" fetches revenue for exactly those
+  companies). Vector search takes its year filter only from the user's own words. A
+  failing tool returns an error instead of stopping the agent.
+- **fallback**: if every chosen tool failed or found nothing, vector search over the
+  report text is tried before answering.
+- **answer**: the LLM answers only from the retrieved context, cites every claim with a
+  passage id or [SQL], and says so when the context does not answer the question. The
+  prompt includes examples of correctly cited answers; if an answer still cites nothing
+  although sources were retrieved, it is rewritten once with citations.
+- **check_citations**: every bracketed citation is validated, including grouped ones
+  such as [A, B]; ids that were never retrieved and pseudo-sources such as
+  [cypher query] become "(unverified)", so an answer cannot point to a source that does
+  not exist. Answers that say the context lacks the information are not forced to cite.

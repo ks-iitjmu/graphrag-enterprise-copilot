@@ -9,3 +9,5 @@ faiss-cpu>=1.8
 numpy>=1.26
 # Step 3: knowledge graph
 neo4j>=5.20
+# Step 5: agent
+langgraph>=0.2
