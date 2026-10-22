@@ -1,8 +1,0 @@
-{"system": "agent", "id": "q01", "metric": "faithfulness", "value": 1.0}
-{"system": "agent", "id": "q01", "metric": "answer_relevancy", "value": 0.9999999999999991}
-{"system": "agent", "id": "q01", "metric": "context_precision", "value": 0.9999999999}
-{"system": "agent", "id": "q01", "metric": "context_recall", "value": 1.0}
-{"system": "agent", "id": "q02", "metric": "faithfulness", "value": 0.0}
-{"system": "agent", "id": "q02", "metric": "answer_relevancy", "value": 0.9999999999999991}
-{"system": "agent", "id": "q02", "metric": "context_precision", "value": 0.9999999999}
-{"system": "agent", "id": "q02", "metric": "context_recall", "value": 1.0}
