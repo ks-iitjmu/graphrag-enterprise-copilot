@@ -1,7 +1,10 @@
-"""Load the structured part of the knowledge graph into Neo4j.
+"""Load the knowledge graph into Neo4j.
 
 Schema
-  (:Company {ticker, name, cik, industry, fiscal_year_end, state_of_incorporation})
+  (:Company:Organization {ticker, name, cik, industry, fiscal_year_end, state_of_incorporation})
+  (:Organization {name})          companies outside the eight, e.g. TSMC, Samsung, Huawei
+  (:Product {name, category})
+  (:Segment {id, name})
   (:Report {id, ticker, fiscal_year, filed, url})
   (:Subsidiary {name})
   (:Jurisdiction {name, country})
@@ -9,7 +12,15 @@ Schema
 
   (Company)-[:FILED]->(Report)
   (Company)-[:HAS_SUBSIDIARY {fiscal_years}]->(Subsidiary)-[:INCORPORATED_IN]->(Jurisdiction)
-  (Company)-[:CITES_RISK {fiscal_year, passages, evidence}]->(RiskTopic)
+  (Company)-[:CITES_RISK {fiscal_year, passages, share, rank, evidence}]->(RiskTopic)
+  (Company)-[:COMPETES_WITH {fiscal_year, mentions, evidence}]->(Organization)
+  (Company)-[:OFFERS {fiscal_year, mentions, evidence}]->(Product)
+  (Company)-[:HAS_SEGMENT {fiscal_year, mentions, evidence}]->(Segment)
+  (Company)-[:HAS_SUPPLIER {role} | :HAS_CUSTOMER | :HAS_PARTNER {fiscal_year, ...}]->(Organization)
+
+Facts from Steps 3a (subsidiaries) and 3b (LLM extraction: competitors, products,
+segments, partners, risk topics). Every LLM-derived relationship keeps the chunk ids
+of the passages it came from, so answers can cite their source.
 
 Re-running is safe: everything is MERGEd. Use --reset to wipe the database first.
 Usage:  python graph/load_graph.py [--reset]
@@ -33,7 +44,23 @@ CONSTRAINTS = [
     "CREATE CONSTRAINT subsidiary_name IF NOT EXISTS FOR (s:Subsidiary) REQUIRE s.name IS UNIQUE",
     "CREATE CONSTRAINT jurisdiction_name IF NOT EXISTS FOR (j:Jurisdiction) REQUIRE j.name IS UNIQUE",
     "CREATE CONSTRAINT risk_topic_name IF NOT EXISTS FOR (t:RiskTopic) REQUIRE t.name IS UNIQUE",
+    "CREATE CONSTRAINT organization_name IF NOT EXISTS FOR (o:Organization) REQUIRE o.name IS UNIQUE",
+    "CREATE CONSTRAINT product_name IF NOT EXISTS FOR (p:Product) REQUIRE p.name IS UNIQUE",
+    "CREATE CONSTRAINT segment_id IF NOT EXISTS FOR (s:Segment) REQUIRE s.id IS UNIQUE",
 ]
+PARTNER_RELS = {"supplier": "HAS_SUPPLIER", "manufacturer": "HAS_SUPPLIER",
+                "customer": "HAS_CUSTOMER", "partner": "HAS_PARTNER"}
+
+
+def records(name: str) -> list[dict]:
+    path = GRAPH / f"{name}.csv"
+    if not path.exists():
+        print(f"  ({name}.csv not found, skipped)")
+        return []
+    df = pd.read_csv(path).fillna("")
+    if "evidence" in df:
+        df["evidence"] = df["evidence"].astype(str)
+    return df.to_dict("records")
 
 
 def run(db, query: str, rows: list | None = None, **params):
@@ -43,8 +70,8 @@ def run(db, query: str, rows: list | None = None, **params):
 def main(reset: bool):
     companies = list(json.loads((RAW / "companies.json").read_text()).values())
     manifest = json.loads((RAW / "manifest.json").read_text())
-    subs = pd.read_csv(GRAPH / "subsidiaries.csv").to_dict("records")
-    risks = pd.read_csv(GRAPH / "risk_topics.csv").to_dict("records")
+    subs = records("subsidiaries")
+    risks = records("risk_topics")
 
     with driver() as db:
         db.verify_connectivity()
@@ -55,7 +82,7 @@ def main(reset: bool):
 
         run(db, """UNWIND $rows AS r
                    MERGE (c:Company {ticker: r.ticker})
-                   SET c.name = r.name, c.cik = r.cik, c.industry = r.industry,
+                   SET c:Organization, c.name = r.name, c.cik = r.cik, c.industry = r.industry,
                        c.fiscal_year_end = r.fiscal_year_end,
                        c.state_of_incorporation = r.state_of_incorporation""", companies)
 
@@ -85,10 +112,42 @@ def main(reset: bool):
         run(db, """UNWIND $rows AS r
                    MATCH (c:Company {ticker: r.ticker}), (t:RiskTopic {name: r.topic})
                    MERGE (c)-[x:CITES_RISK {fiscal_year: r.fiscal_year}]->(t)
-                   SET x.passages = r.passages, x.evidence = split(r.evidence, ';')""", risks)
+                   SET x.passages = r.passages, x.share = r.share, x.rank = r.rank,
+                       x.evidence = split(r.evidence, ';')""", risks)
+
+        run(db, """UNWIND $rows AS r
+                   MATCH (c:Company {ticker: r.ticker})
+                   MERGE (o:Organization {name: r.competitor})
+                   MERGE (c)-[x:COMPETES_WITH {fiscal_year: r.fiscal_year}]->(o)
+                   SET x.mentions = r.mentions, x.evidence = split(r.evidence, ';')""",
+            records("competitors"))
+        run(db, """UNWIND $rows AS r
+                   MATCH (c:Company {ticker: r.ticker})
+                   MERGE (p:Product {name: r.product})
+                   SET p.category = CASE WHEN p.category IS NULL OR p.category = ''
+                                         THEN r.category ELSE p.category END
+                   MERGE (c)-[x:OFFERS {fiscal_year: r.fiscal_year}]->(p)
+                   SET x.mentions = r.mentions, x.evidence = split(r.evidence, ';')""",
+            records("products"))
+        run(db, """UNWIND $rows AS r
+                   MATCH (c:Company {ticker: r.ticker})
+                   MERGE (s:Segment {id: r.ticker + ':' + r.segment})
+                   SET s.name = r.segment
+                   MERGE (c)-[x:HAS_SEGMENT {fiscal_year: r.fiscal_year}]->(s)
+                   SET x.mentions = r.mentions, x.evidence = split(r.evidence, ';')""",
+            records("segments"))
+        partners = records("partners")
+        for role, rel in PARTNER_RELS.items():
+            run(db, f"""UNWIND $rows AS r
+                        MATCH (c:Company {{ticker: r.ticker}})
+                        MERGE (o:Organization {{name: r.organization}})
+                        MERGE (c)-[x:{rel} {{fiscal_year: r.fiscal_year, role: r.role}}]->(o)
+                        SET x.mentions = r.mentions, x.evidence = split(r.evidence, ';')""",
+                [p for p in partners if p["role"] == role])
 
         counts, _, _ = db.execute_query(
-            """MATCH (n) WITH labels(n)[0] AS label, count(*) AS n
+            """MATCH (n) WITH CASE WHEN n:Company THEN 'Company' ELSE labels(n)[0] END AS label,
+                              count(*) AS n
                RETURN label, n ORDER BY label""", database_="neo4j")
         rels, _, _ = db.execute_query(
             """MATCH ()-[r]->() RETURN type(r) AS rel, count(*) AS n ORDER BY rel""",

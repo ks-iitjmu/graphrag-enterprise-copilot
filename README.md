@@ -16,7 +16,7 @@ financial facts, all downloaded from SEC EDGAR. All data is public; none is simu
 
 - [x] Step 1: download filings and build the financial SQL database
 - [x] Step 2: chunk and embed report text into FAISS
-- [ ] Step 3: build the knowledge graph in Neo4j (3a structured facts done; 3b LLM extraction next)
+- [x] Step 3: build the knowledge graph in Neo4j
 - [ ] Step 4: vector, Cypher and SQL tools
 - [ ] Step 5: LangGraph agent with routing and retries
 - [ ] Step 6: evaluation with RAGAS against a vector-only baseline
@@ -93,9 +93,34 @@ python graph/load_graph.py --reset    # load into Neo4j
 |---|---|
 | `Company`, `Report` | SEC company data and the filing manifest (with source URLs for citations) |
 | `Subsidiary`, `Jurisdiction` | Exhibit 21 of each 10-K: tables, ownership-percentage tables and plain lists are all parsed; US states map to country "United States" |
-| `RiskTopic` | 15 fixed topics; each risk-factor passage is assigned to its most similar topic description using the stored embeddings (no LLM calls), and a company cites a topic in a year when at least two passages are assigned to it |
+| `RiskTopic` | 15 fixed topics, tagged by the LLM in Step 3b (`classify_risks.py` holds the topic list and an embedding-based first version, kept for comparison) |
 
 Relationships: `(Company)-[:FILED]->(Report)`,
 `(Company)-[:HAS_SUBSIDIARY {fiscal_years}]->(Subsidiary)-[:INCORPORATED_IN]->(Jurisdiction)`,
 `(Company)-[:CITES_RISK {fiscal_year, passages, evidence}]->(RiskTopic)`, where `evidence`
 holds the chunk ids of the strongest passages so answers can cite them.
+
+## Step 3b: knowledge graph (LLM extraction)
+
+```bash
+python ingest/extract_entities.py --limit 40   # trial run on ~40 passages, check quality and speed
+python ingest/extract_entities.py              # full run (resumes from the cache)
+python graph/load_graph.py --reset
+```
+
+The local LLM (Qwen3 14B through Ollama, structured JSON output, temperature 0) reads
+every passage of Item 1 (Business) and Item 1A (Risk Factors) in each company's latest
+10-K, or Intel's whole report, and returns competitors, products, segments, partners
+(supplier, manufacturer, customer or partner) and risk topics from the fixed list. The
+schema is enforced by Ollama, so every answer is valid JSON.
+
+Names are normalised ("Advanced Micro Devices, Inc." -> AMD, "Taiwan Semiconductor
+Manufacturing Company Limited" -> TSMC), generic phrases ("large cloud providers") are
+dropped, and when a competitor or partner is one of the eight companies it links to that
+company's node. Segments and risk topics need at least two supporting passages. Every
+relationship stores the chunk ids it came from.
+
+Why the LLM rather than embeddings for risk topics: tagging by embedding similarity
+assigned every passage to some topic (3,133 of 3,133), inflated Intel (whose whole report,
+not just its risk chapter, was classified), and almost never found "intense competition",
+because the topic descriptions overlap. The LLM can return several topics or none.
