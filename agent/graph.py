@@ -27,11 +27,13 @@ from tools import cypher_tool, sql_tool, vector_tool  # noqa: E402
 from tools.base import ToolResult  # noqa: E402
 
 RUNNERS = {"sql": sql_tool.answer, "cypher": cypher_tool.answer, "vector": vector_tool.answer}
-SOURCE_ID = re.compile(r"^([A-Z]{2,5}_\d{4}_[0-9A-Z]+_\d{4}|SQL)$")
+SOURCE_ID = re.compile(r"^([A-Z]{2,5}_\d{4}_[0-9A-Z]+_\d{4}|SQL|GRAPH)$")
 BRACKETS = re.compile(r"\[([^\[\]]+)\]")
 PSEUDO_SOURCE = re.compile(r"cypher|graph|query|vector|context|database|knowledge", re.I)
-NOT_FOUND = re.compile(r"(does not|doesn't|do not|did not) (contain|provide|include|mention|cover)|"
-                       r"not (available|provided|included|found|mentioned)|no information", re.I)
+NOT_FOUND = re.compile(r"(does not|doesn't|do not|did not) (contain|provide|include|mention|cover|have)|"
+                       r"not (available|provided|included|found|mentioned|contained)|no (information|data)|"
+                       r"(cannot|can't|unable to) (be )?(answer|determine|find|provide)|"
+                       r"could not generate", re.I)
 ORDER = ["cypher", "sql", "vector"]        # graph first, so its companies can inform the others
 NAMES = {"AAPL": "Apple", "MSFT": "Microsoft", "GOOGL": "Alphabet", "AMZN": "Amazon",
          "META": "Meta Platforms", "NVDA": "NVIDIA", "INTC": "Intel", "AMD": "AMD"}
@@ -61,7 +63,10 @@ def _timed(state: AgentState, step: str, start: float) -> dict:
 
 def route(state: AgentState) -> AgentState:
     t0 = time.time()
-    out = chat_json(ROUTER_SYSTEM, f"Question: {state['question']}", ROUTER_SCHEMA, max_tokens=300)
+    try:
+        out = chat_json(ROUTER_SYSTEM, f"Question: {state['question']}", ROUTER_SCHEMA, max_tokens=300)
+    except Exception:                                # routing failed: use every source
+        out = {"tools": list(TOOLS), "sub_questions": {}}
     tools = [t for t in dict.fromkeys(out.get("tools", [])) if t in TOOLS] or ["vector"]
     subs = out.get("sub_questions", {}) or {}
     sub_questions = {t: (subs.get(t) or state["question"]) for t in tools}
@@ -69,7 +74,7 @@ def route(state: AgentState) -> AgentState:
 
 
 def companies_from(result: ToolResult, limit: int = 4) -> list[str]:
-    """Companies named in a tool's rows, in row order (graph results are ranked)."""
+    """Companies (of the eight) named in a tool's rows, in row order (graph results are ranked)."""
     found = []
     for row in result.rows:
         for ticker in companies_in(" ".join(map(str, row))):
@@ -84,8 +89,8 @@ def run_tools(state: AgentState) -> AgentState:
     original_years = years_in(state["question"])
     for tool in sorted(state["tools"], key=ORDER.index):
         sub = state["sub_questions"][tool]
-        if carried and not companies_in(sub):          # pass companies found by the graph on
-            sub += f" (companies: {', '.join(NAMES[t] for t in carried)})"
+        if carried:                                      # pass the companies the graph found on
+            sub += f" (for these companies found in the knowledge graph: {', '.join(NAMES[t] for t in carried)})"
         try:
             if tool == "vector":                        # years only from the user's own words
                 res = vector_tool.answer(sub, tickers=companies_in(sub), years=original_years)
@@ -120,7 +125,7 @@ def build_context(results: list[ToolResult]) -> str:
         if r.tool == "sql" and r.ok:
             parts.append("[SQL] Financial data (SEC XBRL):\n" + r.as_context())
         elif r.tool == "cypher" and r.ok:
-            parts.append("Knowledge graph rows (evidence = passage ids):\n" + r.as_context())
+            parts.append("[GRAPH] Knowledge graph rows (evidence = passage ids):\n" + r.as_context())
         elif r.tool == "vector" and r.ok:
             parts.append("Report passages:\n" + r.as_context())
         else:
@@ -131,6 +136,8 @@ def build_context(results: list[ToolResult]) -> str:
 def allowed_citations(results: list[ToolResult]) -> set:
     """Ids the answer may cite: retrieved passage ids, plus SQL when financial data was found."""
     allowed = {"SQL"} if any(r.tool == "sql" and r.ok for r in results) else set()
+    if any(r.tool == "cypher" and r.ok for r in results):
+        allowed.add("GRAPH")                    # graph rows without passage ids (e.g. Exhibit 21)
     for r in results:
         if r.tool != "sql" and r.ok:
             allowed.update(r.evidence)
@@ -141,14 +148,21 @@ def answer(state: AgentState) -> AgentState:
     t0 = time.time()
     context = build_context(state["results"])
     user = f"Question: {state['question']}\n\nContext:\n{context}"
-    text = chat_json(ANSWER_SYSTEM, user, ANSWER_SCHEMA, num_ctx=12288,
-                     max_tokens=900).get("answer", "").strip()
+    try:
+        text = chat_json(ANSWER_SYSTEM, user, ANSWER_SCHEMA, num_ctx=12288,
+                         max_tokens=900).get("answer", "").strip()
+    except Exception:                                # never crash: report the failure plainly
+        return {"answer": "I could not generate an answer to this question.",
+                "timings": _timed(state, "answer", t0)}
     if allowed_citations(state["results"]) and not cited_ids(text) and not NOT_FOUND.search(text):
         # Sources were available but none was cited: ask once for a cited rewrite
         retry = (f"{user}\n\nYour previous answer cited no sources:\n{text}\n"
                  "Rewrite it, citing the source id in square brackets after every claim.")
-        text = chat_json(ANSWER_SYSTEM, retry, ANSWER_SCHEMA, num_ctx=12288,
-                         max_tokens=900).get("answer", "").strip() or text
+        try:
+            text = chat_json(ANSWER_SYSTEM, retry, ANSWER_SCHEMA, num_ctx=12288,
+                             max_tokens=900).get("answer", "").strip() or text
+        except Exception:
+            pass                                     # keep the uncited answer
     return {"answer": text, "timings": _timed(state, "answer", t0)}
 
 

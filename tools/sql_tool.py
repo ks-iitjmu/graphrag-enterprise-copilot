@@ -45,6 +45,10 @@ Q: Which company had the highest net margin in 2024?
 SQL: SELECT company, fiscal_year, net_income * 1.0 / revenue AS net_margin FROM annual_financials WHERE fiscal_year = 2024 AND revenue > 0 ORDER BY net_margin DESC
 Q: How did Intel's and AMD's revenue grow year over year?
 SQL: SELECT company, fiscal_year, revenue, revenue * 1.0 / LAG(revenue) OVER (PARTITION BY ticker ORDER BY fiscal_year) - 1 AS growth FROM annual_financials WHERE ticker IN ('INTC', 'AMD') ORDER BY company, fiscal_year
+Q: How much did Alphabet's revenue grow in total from fiscal 2022 to fiscal 2025?
+SQL: SELECT a.company, a.revenue AS revenue_2022, b.revenue AS revenue_2025, b.revenue * 1.0 / a.revenue - 1 AS growth FROM annual_financials a JOIN annual_financials b ON a.ticker = b.ticker WHERE a.ticker = 'GOOGL' AND a.fiscal_year = 2022 AND b.fiscal_year = 2025
+Q: How did revenue change between the two latest fiscal years for Apple and Meta?
+SQL: WITH r AS (SELECT company, ticker, fiscal_year, revenue, ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY fiscal_year DESC) AS k FROM annual_financials WHERE ticker IN ('AAPL', 'META')) SELECT a.company, b.fiscal_year AS from_year, a.fiscal_year AS to_year, b.revenue AS revenue_before, a.revenue AS revenue_after, a.revenue * 1.0 / b.revenue - 1 AS growth FROM r a JOIN r b ON a.ticker = b.ticker AND a.k = 1 AND b.k = 2
 Q: Compare R&D as a share of revenue in each company's latest fiscal year.
 SQL: SELECT a.company, a.fiscal_year, a.research_and_development * 1.0 / a.revenue AS rd_share FROM annual_financials a WHERE a.fiscal_year = (SELECT MAX(fiscal_year) FROM annual_financials b WHERE b.ticker = a.ticker) ORDER BY rd_share DESC"""
 
@@ -53,8 +57,10 @@ SYSTEM = f"""You write one SQLite SELECT query that answers the user's question.
 
 Rules: a single SELECT (or WITH ... SELECT) statement; use the annual_financials view;
 return the company name, fiscal_year and the values needed to answer; compute ratios
-with * 1.0 to avoid integer division; when the question says "latest" use each company's
-own most recent fiscal year. If the question cannot be answered from this data, return
+with * 1.0 to avoid integer division; growth means later / earlier - 1 (never a sum);
+when the question says "latest" use each company's own most recent fiscal year; never
+use LIMIT to choose companies or years (filter with WHERE instead); when a list of
+companies is given, include every one of them. If the question cannot be answered from this data, return
 an empty string as sql.
 
 {EXAMPLES}"""

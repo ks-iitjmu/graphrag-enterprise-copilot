@@ -68,6 +68,8 @@ Q: Which companies rely on TSMC?
 Cypher: MATCH (c:Company)-[r:HAS_SUPPLIER|HAS_PARTNER]->(o:Organization {name: 'TSMC'}) RETURN c.name AS company, type(r) AS relationship, r.role AS role, r.evidence AS evidence
 Q: What wearable products does Apple offer?
 Cypher: MATCH (:Company {ticker: 'AAPL'})-[r:OFFERS]->(p:Product) WHERE toLower(p.category) CONTAINS 'watch' OR toLower(p.category) CONTAINS 'wear' OR toLower(p.category) CONTAINS 'headphone' RETURN p.name AS product, p.category AS category, r.evidence AS evidence
+Q: Which companies have subsidiaries incorporated in Japan?
+Cypher: MATCH (c:Company)-[:HAS_SUBSIDIARY]->(s:Subsidiary)-[:INCORPORATED_IN]->(j:Jurisdiction {country: 'Japan'}) RETURN c.name AS company, count(DISTINCT s) AS subsidiaries ORDER BY subsidiaries DESC
 Q: Which pairs of companies share a manufacturer?
 Cypher: MATCH (a:Company)-[:HAS_SUPPLIER {role: 'manufacturer'}]->(o:Organization)<-[:HAS_SUPPLIER {role: 'manufacturer'}]-(b:Company) WHERE a.ticker < b.ticker RETURN a.name AS company_a, b.name AS company_b, o.name AS manufacturer"""
 
@@ -94,9 +96,19 @@ def system_prompt() -> str:
     return (f"You write one read-only Cypher query that answers the user's question.\n"
             f"{SCHEMA}\n\n{known_names()}\n\n"
             "Rules: MATCH/OPTIONAL MATCH/WHERE/WITH/RETURN/ORDER BY/LIMIT only; never write "
-            "data; use exact names from the lists above; give returned columns clear aliases. "
+            "data; use exact names from the lists above; give returned columns clear aliases; "
+            "whenever you return relationship properties (mentions, evidence, share, rank), "
+            "name the relationship in the pattern, e.g. -[r:COMPETES_WITH]->. "
             "If the graph cannot answer the question, return an empty string as cypher.\n\n"
             f"{EXAMPLES}")
+
+
+def repair_cypher(q: str, error: str) -> str | None:
+    """Fix the most common small-model mistake: returning r.x from an unnamed relationship."""
+    m = re.search(r"Variable `(\w+)` not defined", error)
+    if m and len(re.findall(r"-\[:", q)) == 1:
+        return q.replace("-[:", f"-[{m.group(1)}:", 1)
+    return None
 
 
 def check_cypher(q: str) -> str:
@@ -149,6 +161,17 @@ def answer(question: str) -> ToolResult:
             res.query, res.error = q, str(e).split("\n")[0][:300]
             if "no query" in res.error:
                 return res
+            fixed = repair_cypher(q, str(e))
+            if fixed:
+                try:
+                    res.query = check_cypher(fixed)
+                    res.columns, res.rows = run_cypher(res.query)
+                    res.error = ""
+                    res.evidence = collect_evidence(res.rows)
+                    if res.rows:
+                        return res
+                except Exception:
+                    pass
             feedback = f"failed with: {res.error}"
         user = (f"Question: {question}\nYour previous query:\n{q}\n{feedback}.\n"
                 "Write a corrected query.")

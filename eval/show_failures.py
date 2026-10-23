@@ -1,4 +1,5 @@
-"""List the questions a system got wrong (or wrongly refused), with its route and answer.
+"""List the questions a system got wrong, wrongly refused, or answered when it should have
+refused, with its route and answer.
 
 Usage:  python eval/show_failures.py [agent|baseline]
 """
@@ -14,7 +15,7 @@ tests = {t["id"]: t for t in map(json.loads, (EVAL / "testset.jsonl").read_text(
 runs = {r["id"]: r for r in map(json.loads, (EVAL / "results/runs.jsonl").read_text().splitlines())
         if r["system"] == system}
 s = pd.read_csv(EVAL / "results/exact_scores.csv")
-bad = s[(s.system == system) & ((s.correct == 0) | (s.false_refusal == 1))]
+bad = s[(s.system == system) & ((s.correct == 0) | (s.false_refusal == 1) | (s.refusal_ok == 0))]
 for i in bad.id:
     t, r = tests[i], runs[i]
     print(f"--- {i} [{t['category']}] {t['question']}")

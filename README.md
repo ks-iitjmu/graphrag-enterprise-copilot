@@ -206,12 +206,93 @@ answer prompt, passages and citation check, but no routing, graph or SQL.
 tolerance) and entities appear in the answer; correct and wrong refusals; citation rate
 and invalid citations; whether the source passage of a text question was retrieved;
 latency; and RAGAS 0.4 faithfulness, answer relevancy, context precision and context
-recall, judged by the local Qwen model through Ollama's OpenAI-compatible API.
+recall, judged by the local Qwen model. RAGAS sends requests in OpenAI format; a small
+transport (`eval/ollama_judge.py`) forwards them to Ollama's native API with the output
+schema enforced. Through Ollama's OpenAI-compatible endpoint the schema was silently
+ignored, and the judge then failed precisely on low-scoring cases, which would have
+biased the scores upwards.
 
 **Caveats**: graph references test whether the agent retrieves what the graph holds, not
 whether the LLM-built graph is complete; the RAGAS judge is the same local model that
 answers, which can favour its own style, so the exact checks are reported alongside it.
 
+### Versions
+
+**Version 1** was the first full run. Its failures were studied one by one
+(`python eval/show_failures.py agent`) and fixed in **version 2**:
+
+| Failure in version 1 | Fix in version 2 |
+|---|---|
+| Ratios answered as raw decimals (-0.005 instead of -0.5%) | tool output shows margin, growth and share columns as percentages |
+| "Total growth" computed as a cumulative sum | SQL example for growth between any two years; rule: growth = later / earlier - 1 |
+| `LIMIT 2` used to mean "two companies", dropping one | rule: never use LIMIT to choose companies |
+| Graph companies not passed on when the sub-question named another company | companies found by the graph are always passed to later tools |
+| Cypher "Variable `r` not defined" on every retry | prompt rule, plus automatic repair of exactly this error |
+| Subsidiary names returned instead of company names | worked example for "companies with subsidiaries in X" |
+| Subsidiary answers uncited or incomplete | `[GRAPH]` citation for graph rows without passage ids; "list all relevant items" |
+| Runs crashing on JSON cut off mid-string | automatic retry with a larger output limit; if routing still fails, all three sources are used, and if answering fails, the agent says so instead of crashing |
+| A dollar amount misread by a factor of ten (-267,000,000 read as -$2.7 billion) | tool output shows the billions form next to raw amounts |
+
+One question was removed: its graph-derived reference for Intel's "customers" included
+investors (Silver Lake's SLP VII Gryphon Aggregator, NVIDIA's stake) that the extraction had
+mislabelled. Because version 2 was tuned on the same questions, its scores are optimistic;
+both versions are reported.
+
 ### Results
 
-Paste `eval/results/summary.md` here after running.
+Version 2, 48 questions (44 answerable, 4 unanswerable). Answers and RAGAS judging both
+use Qwen3 14B running locally; all 352 RAGAS evaluations completed.
+
+| Metric | Agent | Vector-only baseline |
+|---|---|---|
+| Correct answers (exact check of numbers and entities) | **97%** | 33% |
+| Correct refusals on unanswerable questions | 100% | 100% |
+| Wrong refusals on answerable questions | **0%** | 23% |
+| Routing accuracy | 100% | n/a |
+| Answers with a valid citation | **100%** | 86% |
+| Citations to sources never retrieved | 2% | 1% |
+| RAGAS faithfulness | **0.92** | 0.78 |
+| RAGAS answer relevancy | **0.96** | 0.79 |
+| RAGAS context precision | **0.82** | 0.40 |
+| RAGAS context recall | **1.00** | 0.57 |
+| Mean response time | 12.6 s | **4.2 s** |
+
+Correct answers by category:
+
+| Category | Agent | Baseline |
+|---|---|---|
+| Financial numbers (15) | **100%** | 40% |
+| Relationships (11) | **91%** | 36% |
+| Combined, two sources (4) | **100%** | 0% |
+| Text (14): RAGAS faithfulness | 0.91 | **0.96** |
+
+Version 1 to version 2 (agent): correct 71% -> 97%, financial 87% -> 100%, relationships
+67% -> 91%, combined 25% -> 100%, wrong refusals 9% -> 0%. The baseline stayed at 33-35%.
+
+**Findings**
+
+1. The gain comes from sending numbers and relationships to structured sources. On
+   financial and relationship questions the agent's context precision is 1.00, against
+   0.33 and 0.22 for the baseline, which retrieves loosely related text. The baseline still
+   answers 40% of financial questions, because the reports' financial tables contain many
+   of the same figures.
+2. On pure text questions the agent is not better, and slightly worse (faithfulness 0.91
+   vs 0.96, context precision 0.63 vs 0.71): for 6 of 14 text questions the router also
+   called SQL or the graph, adding irrelevant context. Keeping text questions on vector
+   search alone is the clearest next improvement.
+3. The exact source passage of a text question is retrieved only 50-57% of the time, yet
+   context recall is 1.00: 10-Ks repeat paragraphs year to year, so an identical paragraph
+   from another year's report is often retrieved instead. Exact-id hit rate understates
+   retrieval quality.
+4. The agent is about three times slower: two or three LLM calls per question instead of one.
+
+**Limitations**
+
+- Version 2 was tuned on these questions, so its scores are optimistic.
+- The judge is the same local model that answers; context recall of 1.00 suggests some
+  leniency. A stronger judge, or a human-checked sample, would make RAGAS more reliable.
+- Graph-derived references test retrieval from the graph, not the graph's completeness,
+  and inherit its extraction errors (one question was removed for this reason).
+- The combined and unanswerable categories have only four questions each.
+- "Fiscal year" follows each company's own calendar (NVIDIA's ends in January, Microsoft's
+  in June).

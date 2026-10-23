@@ -171,12 +171,9 @@ def graph_items(db) -> list[dict]:
                RETURN o.name AS n ORDER BY r.mentions DESC LIMIT 5""")
     e = [r["n"] for r in mfr]
     add("Which organisations does AMD rely on as manufacturers?", e, f"AMD relies on {', '.join(e)} as manufacturers.")
-    cust = q("""MATCH (c:Company)-[r:HAS_CUSTOMER]->(o) WITH c, collect(o.name) AS cs
-                RETURN c.ticker AS t, c.name AS c, cs ORDER BY size(cs) DESC LIMIT 1""")
-    if cust:
-        e = cust[0]["cs"][:5]
-        add(f"Which customers does {cust[0]['c']} name in its annual report?", e,
-            f"{cust[0]['c']} names {', '.join(e)} as customers.")
+    # No "which customers does X name" question: checking the graph showed investors
+    # (e.g. Silver Lake's SLP VII Gryphon Aggregator, NVIDIA's stake in Intel) extracted as
+    # customers, so a graph-derived reference would reward a wrong answer.
     china = q("""MATCH (:Company {ticker: 'AMD'})-[:HAS_SUBSIDIARY]->(s)-[:INCORPORATED_IN]->(j {country: 'China'})
                  RETURN count(DISTINCT s) AS k""")
     if china and china[0]["k"]:

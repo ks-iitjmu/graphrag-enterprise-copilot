@@ -11,7 +11,8 @@ Exact checks (no judge needed)
                that pointed to sources never retrieved
   source_hit   text questions: the passage the question was written from was retrieved
 
-RAGAS 0.4 metrics (judged by the local LLM through Ollama's OpenAI-compatible API)
+RAGAS 0.4 metrics (judged by the local LLM; requests are routed to Ollama's native API
+with the output schema enforced, see eval/ollama_judge.py)
   faithfulness, answer_relevancy, context_precision (with reference), context_recall
 
 Usage:  python eval/score.py                 exact checks only (fast)
@@ -20,6 +21,7 @@ Usage:  python eval/score.py                 exact checks only (fast)
 """
 import argparse
 import asyncio
+import hashlib
 import json
 import re
 import sys
@@ -38,6 +40,16 @@ RAGAS_METRICS = ["faithfulness", "answer_relevancy", "context_precision", "conte
 ENTITY_ALIASES = {"meta platforms": ["meta"], "alphabet": ["alphabet", "google"],
                   "tsmc": ["tsmc", "taiwan semiconductor"], "united states": ["united states", "u.s.", "us "]}
 NUMBER = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+BIG_NUMBER = re.compile(r"(?<![\d.])-?\d{1,3}(?:,\d{3}){3,}(?![\d,])")   # 62,360,000,000
+
+
+def readable_numbers(context: str) -> str:
+    """Add the billions form next to raw dollar amounts in SQL rows, so the judge can match
+    '$62.4 billion' in an answer to '62,360,000,000' in the data. No new information."""
+    def add(m):
+        v = float(m.group(0).replace(",", ""))
+        return f"{m.group(0)} (= ${v / 1e9:,.1f} billion)"
+    return BIG_NUMBER.sub(add, context)
 
 
 def numbers_in(text: str) -> list[float]:
@@ -52,7 +64,9 @@ def numbers_in(text: str) -> list[float]:
 
 
 def has_value(text: str, expected: float) -> bool:
-    tol = max(0.051, 0.006 * abs(expected))
+    # References are rounded to one decimal place, so an answer that rounds the same
+    # underlying number the other way (14.65 -> 14.6 vs 14.7) must still count
+    tol = max(0.101, 0.006 * abs(expected))
     return any(abs(v - expected) <= tol for v in numbers_in(text))
 
 
@@ -86,22 +100,25 @@ def exact_scores(test: dict, run: dict) -> dict:
 
 
 # ------------------------------------------------------------------------------ RAGAS
-def ragas_metrics():
-    """RAGAS judge = the local LLM through Ollama's OpenAI-compatible API.
-
-    RAGAS's default for OpenAI clients is instructor's generic JSON mode, which only asks
-    for "some valid JSON"; the local model then sometimes nests the answer inside a key.
-    JSON_SCHEMA mode makes Ollama enforce the exact output schema instead."""
+def ragas_metrics(temperature: float = 0.0):
+    """RAGAS judge = the local LLM. Requests go through OllamaNativeTransport, which sends
+    them to Ollama's native API with the output schema enforced (see eval/ollama_judge.py);
+    through the OpenAI-compatible endpoint the schema was silently ignored and the judge
+    sometimes answered off-format, which made exactly the low-scoring cases fail."""
+    import httpx
     import instructor
     from openai import AsyncOpenAI
     from ragas.embeddings import OpenAIEmbeddings
     from ragas.llms import InstructorLLM
     from ragas.metrics.collections import (AnswerRelevancy, ContextPrecisionWithReference,
                                            ContextRecall, Faithfulness)
-    client = AsyncOpenAI(base_url=f"{OLLAMA_URL}/v1", api_key="ollama", timeout=900)
+    from eval.ollama_judge import OllamaNativeTransport
+    transport = OllamaNativeTransport(OLLAMA_URL)
+    client = AsyncOpenAI(base_url=f"{OLLAMA_URL}/v1", api_key="ollama", timeout=900,
+                         http_client=httpx.AsyncClient(transport=transport, timeout=900))
     patched = instructor.from_openai(client, mode=instructor.Mode.JSON_SCHEMA)
     llm = InstructorLLM(client=patched, model=LLM_MODEL, provider="openai",
-                        temperature=0, max_tokens=4096)
+                        temperature=temperature, max_tokens=4096)
     emb = OpenAIEmbeddings(client=client, model=EMBED_MODEL)
     return {"faithfulness": Faithfulness(llm=llm),
             "answer_relevancy": AnswerRelevancy(llm=llm, embeddings=emb),
@@ -110,7 +127,8 @@ def ragas_metrics():
 
 
 async def ragas_one(metrics: dict, name: str, test: dict, run: dict):
-    q, a, ref, ctx = test["question"], run["answer"], test["reference"], run["contexts"]
+    q, a, ref = test["question"], run["answer"], test["reference"]
+    ctx = [readable_numbers(c) for c in run["contexts"]]
     if not a or (name != "answer_relevancy" and not ctx):
         return None
     m = metrics[name]
@@ -125,31 +143,54 @@ async def ragas_one(metrics: dict, name: str, test: dict, run: dict):
     return float(r.value)
 
 
-async def run_ragas(tests: dict, runs: list[dict], smoke: bool) -> pd.DataFrame:
+def fingerprint(test: dict, run: dict) -> str:
+    """Scores are cached per question AND per answer, so a re-run answer is re-judged."""
+    blob = json.dumps([test["question"], test["reference"], run["answer"], run["contexts"]])
+    return hashlib.sha1(blob.encode()).hexdigest()[:16]
+
+
+async def run_ragas(tests: dict, runs: list[dict], smoke: bool) -> tuple[pd.DataFrame, dict]:
     cache = {}
     if RAGAS_CACHE.exists():
         for r in map(json.loads, RAGAS_CACHE.read_text().splitlines()):
-            cache[(r["system"], r["id"], r["metric"])] = r["value"]
-    metrics = ragas_metrics()
+            cache[(r["system"], r["id"], r["metric"], r.get("key"))] = r["value"]
+    keys = {(r["system"], r["id"]): fingerprint(tests[r["id"]], r) for r in runs}
+    metrics, retry_metrics = ragas_metrics(0.0), ragas_metrics(0.3)
     todo = [(run, name) for run in runs if tests[run["id"]]["category"] != "unanswerable"
-            for name in RAGAS_METRICS if (run["system"], run["id"], name) not in cache]
+            for name in RAGAS_METRICS
+            if (run["system"], run["id"], name, keys[(run["system"], run["id"])]) not in cache]
     if smoke:
         todo = todo[:2 * len(RAGAS_METRICS)]
-    print(f"RAGAS: {len(todo)} metric evaluations to run ({len(cache)} cached)")
+        for run in {r["id"]: r for r, _ in todo}.values():   # show what the judge sees
+            print(f"\n{run['id']}: {tests[run['id']]['question']}\nanswer: {run['answer']}")
+            for c in run["contexts"][:2]:
+                print("context:", readable_numbers(c)[:400].replace("\n", " / "))
+        print()
+    print(f"RAGAS: {len(todo)} metric evaluations to run")
+    failed = {}
     with RAGAS_CACHE.open("a") as f:
         for k, (run, name) in enumerate(todo, 1):
-            try:
-                value = await ragas_one(metrics, name, tests[run["id"]], run)
-            except Exception as e:
-                print(f"  {run['system']} {run['id']} {name}: failed ({type(e).__name__}: {str(e)[:150]})")
+            key = keys[(run["system"], run["id"])]
+            value, error = None, None
+            for ms in (metrics, retry_metrics):     # retry once with a little randomness
+                try:
+                    value, error = await ragas_one(ms, name, tests[run["id"]], run), None
+                    break
+                except Exception as e:
+                    error = f"{type(e).__name__}: {str(e)[:120]}"
+            if error:
+                failed[(run["system"], name)] = failed.get((run["system"], name), 0) + 1
+                print(f"  {run['system']} {run['id']} {name}: failed twice ({error})")
                 continue
-            cache[(run["system"], run["id"], name)] = value
-            f.write(json.dumps({"system": run["system"], "id": run["id"], "metric": name, "value": value}) + "\n")
+            cache[(run["system"], run["id"], name, key)] = value
+            f.write(json.dumps({"system": run["system"], "id": run["id"], "metric": name,
+                                "key": key, "value": value}) + "\n")
             f.flush()
             if k % 10 == 0 or smoke:
                 print(f"  [{k}/{len(todo)}] {run['system']} {run['id']} {name} = {value}")
-    rows = [{"system": s, "id": i, "metric": m, "value": v} for (s, i, m), v in cache.items()]
-    return pd.DataFrame(rows, columns=["system", "id", "metric", "value"])
+    rows = [{"system": s, "id": i, "metric": m, "value": v} for (s, i, m, key), v in cache.items()
+            if keys.get((s, i)) == key]                # only scores for the current answers
+    return pd.DataFrame(rows, columns=["system", "id", "metric", "value"]), failed
 
 
 # ---------------------------------------------------------------------------- report
@@ -187,10 +228,14 @@ def main(use_ragas: bool, smoke: bool):
     runs = [r for r in map(json.loads, (RESULTS / "runs.jsonl").read_text().splitlines()) if r["id"] in tests]
     exact = pd.DataFrame([exact_scores(tests[r["id"]], r) for r in runs])
     exact.to_csv(RESULTS / "exact_scores.csv", index=False)
-    ragas = asyncio.run(run_ragas(tests, runs, smoke)) if use_ragas else None
+    ragas, failed = asyncio.run(run_ragas(tests, runs, smoke)) if use_ragas else (None, {})
     if smoke:
         return
     text = report(exact, ragas)
+    if ragas is not None:
+        n = ragas.dropna(subset=["value"]).groupby(["system", "metric"]).size()
+        text += "\n\nRAGAS evaluations completed per system and metric (failed after retry in brackets): " + \
+            "; ".join(f"{s} {m} {k} ({failed.get((s, m), 0)})" for (s, m), k in n.items())
     (RESULTS / "summary.md").write_text(text + "\n")
     print(text)
 

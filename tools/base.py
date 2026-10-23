@@ -1,4 +1,5 @@
 """Shared result type for the retrieval tools."""
+import re
 from dataclasses import dataclass, field
 
 
@@ -25,13 +26,24 @@ class ToolResult:
         if self.tool == "vector":
             return "\n\n".join(f"[{p['chunk_id']}] {p['header']}\n{p['text']}" for p in self.passages)
         lines = [" | ".join(map(str, self.columns))]
-        lines += [" | ".join(_fmt(v) for v in r) for r in self.rows[:max_rows]]
+        lines += [" | ".join(_fmt(v, c) for v, c in zip(r, self.columns)) for r in self.rows[:max_rows]]
         if len(self.rows) > max_rows:
             lines.append(f"... {len(self.rows) - max_rows} more rows")
         return f"[{self.tool} query: {self.query}]\n" + "\n".join(lines)
 
 
-def _fmt(v) -> str:
+RATIO_COLUMN = re.compile(r"margin|growth|share|ratio|rate|change", re.I)
+PERCENT_COLUMN = re.compile(r"percent|pct", re.I)
+
+
+def _fmt(v, column: str = "") -> str:
+    # Ratios such as net_margin = -0.00505 are shown as percentages (-0.5%), so the
+    # answer is written in the units people expect. Columns already in percent are kept.
+    if (isinstance(v, float) and abs(v) <= 5 and RATIO_COLUMN.search(str(column))
+            and not PERCENT_COLUMN.search(str(column))):
+        return f"{v * 100:.1f}%"
+    if isinstance(v, float) and abs(v) >= 1e6:      # dollars: give the billions form too
+        return f"{v:,.0f} (= ${v / 1e9:,.2f} billion)"
     if isinstance(v, float):
         return f"{v:,.0f}" if abs(v) >= 1000 else f"{v:.4g}"
     if isinstance(v, list):
