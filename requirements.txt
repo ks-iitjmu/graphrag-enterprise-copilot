@@ -17,6 +17,10 @@ neo4j>=5.20                    # knowledge graph driver
 # Agent
 langgraph>=0.2
 
+# API
+fastapi>=0.110
+uvicorn[standard]>=0.29
+
 # Evaluation
 ragas==0.4.3
 langchain-community<0.4        # ragas 0.4.3 imports a module removed in langchain-community 0.4

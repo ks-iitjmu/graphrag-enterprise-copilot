@@ -43,7 +43,8 @@ def _fmt(v, column: str = "") -> str:
             and not PERCENT_COLUMN.search(str(column))):
         return f"{v * 100:.1f}%"
     if isinstance(v, float) and abs(v) >= 1e6:      # dollars: give the billions form too
-        return f"{v:,.0f} (= ${v / 1e9:,.2f} billion)"
+        sign = "-" if v < 0 else ""
+        return f"{v:,.0f} (= {sign}${abs(v) / 1e9:,.2f} billion)"
     if isinstance(v, float):
         return f"{v:,.0f}" if abs(v) >= 1000 else f"{v:.4g}"
     if isinstance(v, list):
