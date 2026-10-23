@@ -40,6 +40,7 @@ from config import INDEX, LLM_MODEL, OLLAMA_URL, SQL_DB  # noqa: E402
 
 log = logging.getLogger("copilot.api")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+logging.getLogger("faiss.loader").setLevel(logging.WARNING)
 
 STATIC = Path(__file__).resolve().parent / "static"
 CHUNK_ID = r"^[A-Z]{2,5}_\d{4}_[0-9A-Z]{1,3}_\d{4}$"

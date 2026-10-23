@@ -11,7 +11,28 @@ Ollama).
 33% for vector-only RAG with the same model (RAGAS faithfulness 0.92 vs 0.78); see
 [Results](#results). To set it up and run it, see **[RUNNING.md](RUNNING.md)**.
 
-![Web interface](docs/web_ui.png)
+![A question answered from the knowledge graph and financial data, with numbered citations](docs/ui_answer.png)
+
+## Interface
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/ui_home.png" alt="Home screen with example questions"></td>
+    <td width="50%"><img src="docs/ui_passage.png" alt="Citation opened in the side panel, showing the exact 10-K passage"></td>
+  </tr>
+  <tr>
+    <td><b>Ask in plain English.</b> Example questions cover numbers, relationships and text.</td>
+    <td><b>Check every claim.</b> A citation opens the exact passage from the 10-K, with a link to the filing on sec.gov.</td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/graph_nvidia.png" alt="NVIDIA's neighbourhood in the Neo4j knowledge graph"></td>
+    <td width="50%"><img src="docs/api_docs.png" alt="Interactive API documentation"></td>
+  </tr>
+  <tr>
+    <td><b>Knowledge graph.</b> NVIDIA's competitors, suppliers, products, segments, subsidiaries and risk topics in Neo4j.</td>
+    <td><b>API.</b> <code>/ask</code>, <code>/sources</code> and <code>/health</code>, documented and testable at <code>/docs</code>.</td>
+  </tr>
+</table>
 
 ## Data
 
