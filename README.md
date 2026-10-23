@@ -4,7 +4,14 @@ An agentic assistant that answers questions over company annual reports by routi
 question to the right source: vector search over the report text (FAISS), a knowledge
 graph of companies, subsidiaries, competitors and products (Neo4j, queried with Cypher),
 or a SQL database of reported financials. Built with LangGraph, served with FastAPI,
-deployed on Azure, and evaluated with RAGAS.
+evaluated with RAGAS, and run entirely on local models (Qwen3 14B and nomic-embed-text via
+Ollama).
+
+**Result:** on a 48-question test set, the agent answers 97% of questions correctly against
+33% for vector-only RAG with the same model (RAGAS faithfulness 0.92 vs 0.78); see
+[Results](#results). To set it up and run it, see **[RUNNING.md](RUNNING.md)**.
+
+![Web interface](docs/web_ui.png)
 
 ## Data
 
@@ -12,26 +19,20 @@ SEC 10-K annual reports for Apple, Microsoft, Alphabet, Amazon, Meta, NVIDIA, In
 AMD (three most recent fiscal years), their Exhibit 21 subsidiary lists, and XBRL
 financial facts, all downloaded from SEC EDGAR. All data is public; none is simulated.
 
-## Status
-
-- [x] Step 1: download filings and build the financial SQL database
-- [x] Step 2: chunk and embed report text into FAISS
-- [x] Step 3: build the knowledge graph in Neo4j
-- [x] Step 4: vector, Cypher and SQL tools
-- [x] Step 5: LangGraph agent with routing and retries
-- [x] Step 6: evaluation with RAGAS against a vector-only baseline
-- [x] Step 7: FastAPI service
-- [ ] Step 8: deployment on Azure
-
 ## Setup
+
+Full instructions, a setup checker, a one-command data build and troubleshooting are in
+**[RUNNING.md](RUNNING.md)**. In short:
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-# or, to reproduce the reported results exactly:  pip install -r requirements-lock.txt
-cp .env.example .env          # then edit: your name and email for the SEC, a Neo4j password
+pip install -r requirements-lock.txt
+cp .env.example .env            # add your SEC user agent and a Neo4j password
 set -a && source .env && set +a
-docker compose up -d          # Neo4j at http://localhost:7474
+docker compose up -d            # Neo4j
+python scripts/check_setup.py
+bash scripts/build_all.sh       # about 1 hour, mostly the one-off LLM extraction
+uvicorn api.main:app --host 0.0.0.0 --port 8000 --no-server-header
 ```
 
 ## Step 1: data
@@ -179,43 +180,6 @@ question -> route -> run_tools --(something found)--> answer -> check_citations 
   [cypher query] become "(unverified)", so an answer cannot point to a source that does
   not exist. Answers that say the context lacks the information are not forced to cite.
 
-## Step 7: API (FastAPI)
-
-```bash
-uvicorn api.main:app --host 0.0.0.0 --port 8000 --no-server-header
-# web page: http://localhost:8000      interactive API docs: http://localhost:8000/docs
-```
-
-| Endpoint | Returns |
-|---|---|
-| `POST /ask` | answer, citations resolved to sources (company, fiscal year, section, SEC link; or the SQL / graph source), route taken, timings; with `include_details` also sub-questions and generated queries |
-| `GET /sources/{id}` | the full text of a cited passage, so a claim can be checked |
-| `GET /health` | status of each dependency: Ollama and the model, Neo4j, the SQL database, the vector index |
-| `GET /` | a minimal web page: ask a question, click a citation to read the passage |
-
-```bash
-curl -s localhost:8000/ask -H 'Content-Type: application/json' \
-     -d '{"question": "Which companies name AMD as a competitor?"}' | python -m json.tool
-```
-
-The vector index loads once at startup. Questions are answered one at a time, because a
-single local GPU serves one LLM request well. All settings come from environment variables.
-
-**Security** (`api/security.py`, configured in `.env`):
-
-| Risk | Control |
-|---|---|
-| Script injection into the page | strict Content Security Policy (scripts and styles only from this server, no inline code); all model output escaped before display; source links allowed only to sec.gov |
-| Request floods on a single GPU | per-client rate limit on `/ask` (default 6 per minute); when the model is busy, requests wait briefly, then get HTTP 429 instead of queueing without limit |
-| Oversized requests | bodies above 10 kB rejected (HTTP 413) before they are read; questions limited to 500 characters, control characters removed |
-| Unwanted access | optional access key (`API_KEY`, header `X-API-Key`, compared in constant time) for `/ask` and `/sources`; the web page asks for it once per tab |
-| Information leaks | failures return a generic message with a reference id, details only in the server log; `/health` reports states, never errors; server header hidden; docs can be disabled |
-| Cross-site use | CORS closed unless `ALLOWED_ORIGINS` is set; framing denied; `nosniff`, strict referrer policy, HSTS behind HTTPS |
-| Prompt injection into queries | read-only SQLite connection, read-only Neo4j transactions, write clauses rejected, passage ids validated by pattern |
-
-The web page (`api/static/`) has no inline code, so the strict policy applies to it. The
-border animation stops when the operating system asks for reduced motion.
-
 ## Step 6: evaluation
 
 ```bash
@@ -334,3 +298,39 @@ Version 1 to version 2 (agent): correct 71% -> 97%, financial 87% -> 100%, relat
 - The combined and unanswerable categories have only four questions each.
 - "Fiscal year" follows each company's own calendar (NVIDIA's ends in January, Microsoft's
   in June).
+
+## Step 7: API (FastAPI)
+
+```bash
+uvicorn api.main:app --host 0.0.0.0 --port 8000 --no-server-header
+# web page: http://localhost:8000      interactive API docs: http://localhost:8000/docs
+```
+
+| Endpoint | Returns |
+|---|---|
+| `POST /ask` | answer, citations resolved to sources (company, fiscal year, section, SEC link; or the SQL / graph source), route taken, timings; with `include_details` also sub-questions and generated queries |
+| `GET /sources/{id}` | the full text of a cited passage, so a claim can be checked |
+| `GET /health` | status of each dependency: Ollama and the model, Neo4j, the SQL database, the vector index |
+| `GET /` | a minimal web page: ask a question, click a citation to read the passage |
+
+```bash
+curl -s localhost:8000/ask -H 'Content-Type: application/json' \
+     -d '{"question": "Which companies name AMD as a competitor?"}' | python -m json.tool
+```
+
+The vector index loads once at startup. Questions are answered one at a time, because a
+single local GPU serves one LLM request well. All settings come from environment variables.
+
+**Security** (`api/security.py`, configured in `.env`):
+
+| Risk | Control |
+|---|---|
+| Script injection into the page | strict Content Security Policy (scripts and styles only from this server, no inline code); all model output escaped before display; source links allowed only to sec.gov |
+| Request floods on a single GPU | per-client rate limit on `/ask` (default 6 per minute); when the model is busy, requests wait briefly, then get HTTP 429 instead of queueing without limit |
+| Oversized requests | bodies above 10 kB rejected (HTTP 413) before they are read; questions limited to 500 characters, control characters removed |
+| Unwanted access | optional access key (`API_KEY`, header `X-API-Key`, compared in constant time) for `/ask` and `/sources`; the web page asks for it once per tab |
+| Information leaks | failures return a generic message with a reference id, details only in the server log; `/health` reports states, never errors; server header hidden; docs can be disabled |
+| Cross-site use | CORS closed unless `ALLOWED_ORIGINS` is set; framing denied; `nosniff`, strict referrer policy, HSTS behind HTTPS |
+| Prompt injection into queries | read-only SQLite connection, read-only Neo4j transactions, write clauses rejected, passage ids validated by pattern |
+
+The web page (`api/static/`) has no inline code, so the strict policy applies to it.

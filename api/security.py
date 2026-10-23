@@ -5,7 +5,7 @@
   MAX_BODY_BYTES          largest accepted request body (default 10 kB)
   ALLOWED_ORIGINS         comma-separated origins allowed to call the API from a browser
                           (default: none, so only the page served by this API can call it)
-  TRUST_PROXY             "1" behind a reverse proxy (e.g. Azure): read the client address
+  TRUST_PROXY             "1" behind a reverse proxy or cloud load balancer: read the client address
                           from X-Forwarded-For
   ENABLE_DOCS             "0" hides /docs and /openapi.json
   BUSY_WAIT_SECONDS       how long a question waits for the model before "busy" (default 30)
