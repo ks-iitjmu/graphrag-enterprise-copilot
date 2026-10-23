@@ -28,6 +28,7 @@ financial facts, all downloaded from SEC EDGAR. All data is public; none is simu
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+#or, to reproduce the reported results exactly:  pip install -r requirements-lock.txt
 cp .env.example .env          # then edit: your name and email for the SEC, a Neo4j password
 set -a && source .env && set +a
 docker compose up -d          # Neo4j at http://localhost:7474
